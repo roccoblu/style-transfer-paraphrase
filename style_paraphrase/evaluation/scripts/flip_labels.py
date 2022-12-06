@@ -1,6 +1,9 @@
 import argparse
+import sys
 
-from style_paraphrase.evaluation.similarity.test_sim import find_similarity
+sys.path.append('/content/style-transfer-paraphrase/style_paraphrase/evaluation/similarity')
+from test_sim import find_similarity
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--file1', type=str, default=None)
