@@ -1,6 +1,8 @@
 import torch
-from style_paraphrase.evaluation.similarity.sim_models import WordAveraging
-from style_paraphrase.evaluation.similarity.sim_utils import Example
+import sys
+sys.path.append('/content/style-transfer-paraphrase/style_paraphrase/evaluation/similarity')
+from sim_models import WordAveraging
+from sim_utils import Example
 from nltk.tokenize import TreebankWordTokenizer
 import sentencepiece as spm
 
