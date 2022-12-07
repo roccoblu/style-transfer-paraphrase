@@ -9,14 +9,16 @@ import numpy as np
 from collections import namedtuple
 
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from transformers import GPTNeoForCausalLM, GPT2Tokenizer
 
 from functools import partial
 
 from style_paraphrase.dataset_config import DATASET_CONFIG
 from style_paraphrase.data_utils import update_config, Instance
+from transformers.models import gpt_neo
 
 MODEL_CLASSES = {
-    'gpt2': (GPT2LMHeadModel, GPT2Tokenizer)
+    'gpt2': (GPT2LMHeadModel, GPT2Tokenizer), 'gpt-neo': (GPTNeoForCausalLM, GPT2Tokenizer)
 }
 
 
@@ -57,6 +59,19 @@ def init_gpt2_model(checkpoint_dir, args, model_class, tokenizer_class=None):
         tokenizer = None
 
     return GPT2ParentModule(args=args, gpt2=model), tokenizer
+
+def init_gpt_neo_model(checkpoint_dir, args, model_class, tokenizer_class=None):
+    """Load a trained model and vocabulary that you have fine-tuned."""
+
+    model = model_class.from_pretrained(checkpoint_dir)
+    model.to(args.device)
+
+    if tokenizer_class:
+        tokenizer = tokenizer_class.from_pretrained(checkpoint_dir, do_lower_case=args.do_lower_case)
+    else:
+        tokenizer = None
+
+    return GPTNeoParentModule(args=args, gpt_neo=model), tokenizer
 
 
 class GPT2ParentModule(nn.Module):
@@ -174,6 +189,120 @@ class GPT2ParentModule(nn.Module):
             )
         return out, dense_length, scores
 
+class GPTNeoParentModule(nn.Module):
+    def __init__(self, args, gpt_neo):
+        super(GPTNeoParentModule, self).__init__()
+        self.args = args
+        self.gpt_neo = gpt_neo
+
+    def forward(self, batch):
+        args = self.args
+        gpt_neo = self.gpt_neo
+
+        sentences = batch["sentence"].to(args.device)
+        labels = batch["label"].to(args.device)
+        segments = batch["segment"].to(args.device)
+        global_dense_vectors = batch["global_dense_vectors"].to(args.device)
+
+        if args.global_dense_feature_list == "none":
+            prefix_input_vectors = None
+        else:
+            prefix_input_vectors = global_dense_vectors
+
+        gpt_neo.train()
+        if prefix_input_vectors is None:
+            outputs = gpt_neo(
+                input_ids=sentences,
+                token_type_ids=segments,
+                labels=labels
+            )
+        else:
+            outputs = gpt_neo(
+                input_ids=sentences,
+                token_type_ids=segments,
+                labels=labels,
+                prefix_input_vectors=prefix_input_vectors
+            )
+
+        loss = {
+            "lm": outputs[0]
+        }
+
+        return loss
+
+    def evaluate(self, batch):
+        args = self.args
+        gpt_neo = self.gpt_neo
+
+        sentences = batch["sentence"].to(args.device)
+        labels = batch["label"].to(args.device)
+        segments = batch["segment"].to(args.device)
+        global_dense_vectors = batch["global_dense_vectors"].to(args.device)
+
+        if args.global_dense_feature_list == "none":
+            prefix_input_vectors = None
+        else:
+            prefix_input_vectors = global_dense_vectors
+
+        with torch.no_grad():
+            if prefix_input_vectors is None:
+                outputs = gpt_neo(
+                    input_ids=sentences,
+                    token_type_ids=segments,
+                    labels=labels
+                )
+            else:
+                outputs = gpt_neo(
+                    input_ids=sentences,
+                    token_type_ids=segments,
+                    labels=labels,
+                    prefix_input_vectors=prefix_input_vectors
+                )
+            lm_loss = outputs[0]
+
+        return lm_loss.mean().item()
+
+    def generate(self, gpt_neo_sentences, segments, global_dense_vectors=None,
+                 init_context_size=1, eos_token_id=None, get_scores=False,
+                 interpolation=None, top_p=None):
+        args = self.args
+        gpt_neo = self.gpt_neo
+
+        if args.global_dense_feature_list == "none":
+            style_content_vectors = None
+        else:
+            style_content_vectors = global_dense_vectors
+
+        generation_length = None if self.args.stop_token == "eos" else len(gpt_neo_sentences[0]) - init_context_size
+        dense_length = 0 if style_content_vectors is None else len(style_content_vectors[0])
+
+        if args.beam_size > 1:
+            out, scores = beam_search(
+                model=gpt_neo,
+                length=generation_length,
+                context=gpt_neo_sentences[:, 0:init_context_size],
+                style_content_vectors=style_content_vectors,  # mixed_style_content,
+                segments=segments[:, 0:dense_length + init_context_size],
+                eos_token_id=eos_token_id,
+                beam_size=args.beam_size,
+                beam_search_scoring=args.beam_search_scoring
+            )
+        else:
+            out, scores = sample_sequence(
+                model=gpt_neo,
+                context=gpt_neo_sentences[:, 0:init_context_size],
+                style_content_vectors=style_content_vectors,  # mixed_style_content,
+                segments=segments[:, 0:dense_length + init_context_size],
+                eos_token_id=eos_token_id,
+                num_samples=args.num_samples,
+                length=generation_length,
+                temperature=args.temperature,
+                top_k=args.top_k,
+                top_p=top_p or args.top_p,
+                get_scores=True,
+                interpolation=interpolation
+            )
+        return out, dense_length, scores
 
 def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')):
     """ Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
